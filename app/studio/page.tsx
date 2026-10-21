@@ -1,0 +1,534 @@
+'use client';
+
+import React, { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
+import { 
+  Sparkles, 
+  Upload, 
+  Download, 
+  RotateCcw, 
+  Layers, 
+  Sliders, 
+  ZoomIn, 
+  ZoomOut, 
+  Eye, 
+  Copy, 
+  Check, 
+  ArrowLeft,
+  Coins,
+  History as HistoryIcon,
+  Maximize2
+} from 'lucide-react';
+import Navbar from '@/components/Navbar';
+import Footer from '@/components/Footer';
+import ImageUploader from '@/components/Studio/ImageUploader';
+import BackgroundEditor from '@/components/Studio/BackgroundEditor';
+import ComparisonSlider from '@/components/Studio/ComparisonSlider';
+import ExportModal from '@/components/Studio/ExportModal';
+import { compositeBackdrop, loadImage } from '@/lib/image-processor';
+import { saveProcessedImage, getStoredImages } from '@/lib/storage';
+import { BACKDROP_PRESETS, SAMPLE_IMAGES } from '@/lib/sample-images';
+import { useAuth } from '@/lib/auth-context';
+import { useToast } from '@/lib/toast-context';
+
+export default function StudioPage() {
+  const { user, consumeCredit } = useAuth();
+  const { success, error, info } = useToast();
+
+  const [originalSource, setOriginalSource] = useState<string | null>(null);
+  const [originalFileName, setOriginalFileName] = useState<string>('image.png');
+  const [isolatedForeground, setIsolatedForeground] = useState<string | null>(null);
+  const [compositedResult, setCompositedResult] = useState<string | null>(null);
+  
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [progressStep, setProgressStep] = useState('Initializing AI Model...');
+
+  // Background styling state
+  const [bgType, setBgType] = useState<'transparent' | 'color' | 'gradient' | 'image'>('transparent');
+  const [bgColor, setBgColor] = useState<string>('#FFFFFF');
+  const [bgImage, setBgImage] = useState<string>('');
+  const [featherRadius, setFeatherRadius] = useState<number>(2);
+  const [sensitivity, setSensitivity] = useState<number>(48);
+  const [detectedBgColor, setDetectedBgColor] = useState<{ r: number; g: number; b: number; hex: string } | null>(null);
+  const [dropShadow, setDropShadow] = useState<boolean>(false);
+
+  // View state
+  const [showComparison, setShowComparison] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [isExportOpen, setIsExportOpen] = useState(false);
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0, sizeBytes: 0 });
+
+  // On mount, check if there's a pending image from the homepage
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem('purecut_current_edit');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        setOriginalSource(parsed.originalUrl || parsed.resultUrl);
+        setOriginalFileName(parsed.name || 'image.png');
+        setIsolatedForeground(parsed.resultUrl);
+        setCompositedResult(parsed.resultUrl);
+        setDimensions({
+          width: parsed.width || 800,
+          height: parsed.height || 600,
+          sizeBytes: parsed.sizeBytes || 400000,
+        });
+        sessionStorage.removeItem('purecut_current_edit');
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  /**
+   * Calls the server-side /api/process-image endpoint which uses
+   * @huggingface/transformers + RMBG-1.4 for real AI background removal.
+   * Falls back to raw RGBA if sharp is not installed.
+   */
+  const removeBackgroundViaAPI = async (
+    source: string | File,
+    onProgress: (p: number, step?: string) => void
+  ): Promise<{ dataUrl: string; width: number; height: number; sizeBytes: number; durationMs: number }> => {
+    onProgress(10, 'Preparing image...');
+
+    let file: File;
+    if (typeof source === 'string') {
+      // Convert dataURL / URL to File
+      const res = await fetch(source);
+      const blob = await res.blob();
+      file = new File([blob], 'image.png', { type: blob.type || 'image/png' });
+    } else {
+      file = source;
+    }
+
+    onProgress(25, 'Uploading to AI engine...');
+
+    const fd = new FormData();
+    fd.append('image', file);
+
+    onProgress(40, 'Running Neural AI Matting...');
+
+    const response = await fetch('/api/process-image', {
+      method: 'POST',
+      body: fd,
+    });
+
+    onProgress(80, 'Applying mask to image...');
+
+    if (!response.ok) {
+      const errJson = await response.json().catch(() => ({ error: 'Unknown server error' }));
+      throw new Error(errJson.error || `Server error ${response.status}`);
+    }
+
+    const format = response.headers.get('X-PureCut-Format') || 'png';
+    const durationMs = parseInt(response.headers.get('X-PureCut-Duration-Ms') || '0', 10);
+
+    let dataUrl: string;
+    let width = 0;
+    let height = 0;
+
+    if (format === 'raw-rgba') {
+      // Server sent raw RGBA bytes (8-byte header: width(4) + height(4))
+      const buffer = await response.arrayBuffer();
+      const headerView = new DataView(buffer);
+      width = headerView.getUint32(0);
+      height = headerView.getUint32(4);
+      const rawRgba = new Uint8ClampedArray(buffer, 8);
+
+      // Render to canvas to get PNG dataURL
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d')!;
+      const imgData = new ImageData(rawRgba, width, height);
+      ctx.putImageData(imgData, 0, 0);
+      dataUrl = canvas.toDataURL('image/png');
+    } else {
+      // Server sent PNG binary
+      const blob = await response.blob();
+      dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.readAsDataURL(blob);
+      });
+      // Get dimensions from headers or decode from image
+      width = parseInt(response.headers.get('X-PureCut-Width') || '0', 10);
+      height = parseInt(response.headers.get('X-PureCut-Height') || '0', 10);
+      if (!width || !height) {
+        const img = await loadImage(dataUrl);
+        width = img.naturalWidth;
+        height = img.naturalHeight;
+      }
+    }
+
+    onProgress(95, 'Finalizing...');
+
+    return { dataUrl, width, height, sizeBytes: dataUrl.length * 0.75, durationMs };
+  };
+
+  // Handle new image selection
+  const handleImageSelected = async (source: string | File, name: string) => {
+    setIsProcessing(true);
+    setProgress(10);
+    setProgressStep('Processing with PureCut Neural AI...');
+    setOriginalFileName(name);
+
+    try {
+      // Read original source for comparison preview
+      let srcUrl = '';
+      if (typeof source === 'string') {
+        srcUrl = source;
+      } else {
+        srcUrl = URL.createObjectURL(source);
+      }
+      setOriginalSource(srcUrl);
+
+      // Call server-side AI background removal
+      const result = await removeBackgroundViaAPI(source, (p, step) => {
+        setProgress(p);
+        if (step) setProgressStep(step);
+      });
+
+      setIsolatedForeground(result.dataUrl);
+      setCompositedResult(result.dataUrl);
+      setDetectedBgColor(null); // AI model doesn't report bg color
+      setDimensions({
+        width: result.width,
+        height: result.height,
+        sizeBytes: result.sizeBytes,
+      });
+
+      // Deduct credit if authenticated
+      consumeCredit();
+
+      // Save to history storage
+      const newImg = {
+        id: `img_${Date.now()}`,
+        userId: user?.id,
+        name,
+        originalUrl: srcUrl,
+        resultUrl: result.dataUrl,
+        width: result.width,
+        height: result.height,
+        sizeBytes: result.sizeBytes,
+        backgroundType: 'transparent' as const,
+        createdAt: new Date().toISOString(),
+      };
+      saveProcessedImage(newImg);
+
+      success('Background Removed!', `AI processed in ${result.durationMs}ms.`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Processing failed';
+      error('AI Processing Failed', msg);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleRecalculate = async () => {
+    if (!originalSource) return;
+    setIsProcessing(true);
+    setProgress(15);
+    setProgressStep('Re-running AI model...');
+    try {
+      const result = await removeBackgroundViaAPI(originalSource, (p, step) => {
+        setProgress(p);
+        if (step) setProgressStep(step);
+      });
+      setIsolatedForeground(result.dataUrl);
+      setCompositedResult(result.dataUrl);
+      setDetectedBgColor(null);
+      success('Updated Cutout', `AI re-processed successfully.`);
+    } catch {
+      error('Failed', 'Could not recalculate cutout.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Re-composite when backdrop presets or options change
+  useEffect(() => {
+    if (!isolatedForeground) return;
+
+    if (bgType === 'transparent') {
+      setCompositedResult(isolatedForeground);
+      return;
+    }
+
+    let isMounted = true;
+    compositeBackdrop(isolatedForeground, {
+      backgroundType: bgType,
+      backgroundColor: bgColor,
+      backgroundImageUrl: bgImage,
+      dropShadow,
+      shadowBlur: 25,
+      shadowOffsetY: 12,
+    }).then((res) => {
+      if (isMounted) setCompositedResult(res);
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isolatedForeground, bgType, bgColor, bgImage, dropShadow]);
+
+  const handleSelectPreset = (preset: typeof BACKDROP_PRESETS[0]) => {
+    setBgType(preset.type as any);
+    if (preset.type === 'color' || preset.type === 'gradient') {
+      setBgColor(preset.value);
+    } else if (preset.type === 'image') {
+      setBgImage(preset.value);
+    }
+  };
+
+  const handleResetToTransparent = () => {
+    setBgType('transparent');
+    setDropShadow(false);
+    setZoomLevel(1);
+    info('Reset', 'Restored transparent background.');
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 transition-colors">
+      <Navbar />
+
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* If no image has been processed yet, show Upload Studio View */}
+        {!isolatedForeground ? (
+          <div className="max-w-3xl mx-auto py-8 space-y-8">
+            <div className="text-center space-y-2">
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white">
+                AI Background Removal Studio
+              </h1>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Upload any picture to automatically isolate subjects with pixel-accurate edges.
+              </p>
+            </div>
+
+            <ImageUploader
+              onImageSelected={handleImageSelected}
+              isProcessing={isProcessing}
+              progress={progress}
+              progressStep={progressStep}
+            />
+
+            {/* Quick Tips */}
+            <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Pro Tips For Best Results
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs text-slate-600 dark:text-slate-400">
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60">
+                  <p className="font-semibold text-slate-900 dark:text-white mb-1">Clear Contrast</p>
+                  Photos with contrast between the subject and background produce razor-sharp edges.
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60">
+                  <p className="font-semibold text-slate-900 dark:text-white mb-1">High Resolution</p>
+                  Supports full-resolution camera uploads up to 25 Megapixels with zero compression.
+                </div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60">
+                  <p className="font-semibold text-slate-900 dark:text-white mb-1">Multiple Subjects</p>
+                  Handles groups of people, cars, furniture, jewelry, and pet fur effortlessly.
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* Interactive Editor Workspace */
+          <div className="space-y-4">
+            {/* Studio Toolbar Header */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setIsolatedForeground(null)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 transition"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>New Image</span>
+                </button>
+                <div className="hidden sm:block">
+                  <h2 className="text-xs font-bold text-slate-900 dark:text-white truncate max-w-xs">
+                    {originalFileName}
+                  </h2>
+                  <p className="text-[10px] text-slate-400">
+                    {dimensions.width} × {dimensions.height} px • {(dimensions.sizeBytes / 1024).toFixed(0)} KB
+                  </p>
+                </div>
+              </div>
+
+              {/* View & Comparison Toggle */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowComparison(!showComparison)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+                    showComparison
+                      ? 'bg-indigo-600 text-white'
+                      : 'border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>{showComparison ? 'Exit Split View' : 'Compare Before/After'}</span>
+                </button>
+
+                <button
+                  onClick={handleResetToTransparent}
+                  className="p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 dark:hover:text-white transition"
+                  title="Reset backdrop to transparent"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+
+                {/* Export Button */}
+                <button
+                  onClick={() => setIsExportOpen(true)}
+                  className="flex items-center gap-2 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition hover:scale-102"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Export Image</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Main Stage Grid: Canvas on left, Controls on right */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+              {/* Image Canvas Box */}
+              <div className="lg:col-span-2 space-y-3">
+                <div className="relative aspect-[4/3] rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-md overflow-hidden flex items-center justify-center p-4">
+                  {showComparison && originalSource ? (
+                    <ComparisonSlider
+                      originalSrc={originalSource}
+                      processedSrc={compositedResult || isolatedForeground}
+                      backgroundType={bgType}
+                      backgroundColor={bgColor}
+                      backgroundImageUrl={bgImage}
+                      className="w-full h-full"
+                    />
+                  ) : (
+                    <div 
+                      className={`relative w-full h-full rounded-2xl overflow-hidden flex items-center justify-center transition-all ${
+                        bgType === 'transparent' ? 'bg-transparency-grid' : ''
+                      }`}
+                      style={{
+                        backgroundColor: bgType === 'color' ? bgColor : undefined,
+                        background: bgType === 'gradient' ? bgColor : undefined,
+                        backgroundImage: bgType === 'image' ? `url(${bgImage})` : undefined,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center',
+                      }}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={compositedResult || isolatedForeground}
+                        alt="Cutout result"
+                        className="w-full h-full object-contain transition-transform duration-200"
+                        style={{ transform: `scale(${zoomLevel})` }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Zoom controls floating in corner */}
+                  {!showComparison && (
+                    <div className="absolute bottom-6 right-6 flex items-center gap-1 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border border-slate-200 dark:border-slate-700 rounded-xl p-1 shadow-lg">
+                      <button
+                        onClick={() => setZoomLevel((z) => Math.max(0.5, z - 0.25))}
+                        className="p-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        title="Zoom out"
+                      >
+                        <ZoomOut className="w-3.5 h-3.5" />
+                      </button>
+                      <span className="text-[10px] font-mono px-1 text-slate-500">
+                        {Math.round(zoomLevel * 100)}%
+                      </span>
+                      <button
+                        onClick={() => setZoomLevel((z) => Math.min(2.5, z + 0.25))}
+                        className="p-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        title="Zoom in"
+                      >
+                        <ZoomIn className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Status Bar */}
+                <div className="flex items-center justify-between text-xs text-slate-500 px-2">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                    <span>Transparency active • 100% loss-free alpha channel</span>
+                  </span>
+                  <Link
+                    href="/dashboard/history"
+                    className="flex items-center gap-1 text-indigo-600 dark:text-indigo-400 hover:underline"
+                  >
+                    <HistoryIcon className="w-3.5 h-3.5" />
+                    <span>View in History</span>
+                  </Link>
+                </div>
+              </div>
+
+              {/* Sidebar Controls */}
+              <div className="space-y-6">
+                <BackgroundEditor
+                  activeType={bgType}
+                  activeColor={bgColor}
+                  activeImage={bgImage}
+                  featherRadius={featherRadius}
+                  sensitivity={sensitivity}
+                  detectedBgColor={detectedBgColor}
+                  dropShadow={dropShadow}
+                  onSelectPreset={handleSelectPreset}
+                  onColorChange={(color) => {
+                    setBgType('color');
+                    setBgColor(color);
+                  }}
+                  onFeatherChange={(val) => setFeatherRadius(val)}
+                  onSensitivityChange={(val) => setSensitivity(val)}
+                  onReapplySensitivity={handleRecalculate}
+                  onDropShadowChange={(val) => setDropShadow(val)}
+                />
+
+                {/* Quick Export CTA Card */}
+                <div className="p-5 rounded-2xl bg-gradient-to-tr from-indigo-900 to-slate-900 text-white shadow-lg space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-bold uppercase tracking-wider text-indigo-300">
+                      Save & Export
+                    </p>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      High Quality
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Download this cut-out directly as a transparent PNG or copy the raw image to your clipboard.
+                  </p>
+                  <button
+                    onClick={() => setIsExportOpen(true)}
+                    className="w-full py-2.5 px-4 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs shadow-md transition flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Download Cutout</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      <Footer />
+
+      {/* Export Modal */}
+      {compositedResult && (
+        <ExportModal
+          isOpen={isExportOpen}
+          onClose={() => setIsExportOpen(false)}
+          resultDataUrl={compositedResult}
+          originalFileName={originalFileName}
+          width={dimensions.width}
+          height={dimensions.height}
+          sizeBytes={dimensions.sizeBytes}
+        />
+      )}
+    </div>
+  );
+}
