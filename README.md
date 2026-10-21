@@ -37,6 +37,33 @@ PureCut AI is a modern, production-grade AI background removal and image editing
 
 ---
 
+## 🚀 Deploy to Vercel
+
+PureCut AI is pre-configured for one-click deployment on [Vercel](https://vercel.com):
+
+1. **Push to your GitHub repository**:
+   ```bash
+   git remote add origin https://github.com/<your-username>/purecut-ai.git
+   git branch -M main
+   git push -u origin main
+   ```
+
+2. **Import into Vercel**:
+   - Go to [vercel.com/new](https://vercel.com/new).
+   - Select your `purecut-ai` repository.
+   - Framework preset will automatically be detected as **Next.js**.
+
+3. **Environment Variables (Optional)**:
+   Add any of the following if you want cloud database or Gemini AI features:
+   - `GEMINI_API_KEY`: Your Google Gemini API Key (optional, for Gemini Vision tagging).
+   - `NEXT_PUBLIC_SUPABASE_URL`: Your Supabase Project URL (optional).
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`: Your Supabase Anon Key (optional).
+
+4. **Click Deploy**:
+   Vercel will build and deploy your project live with an automatic HTTPS URL.
+
+---
+
 ## 📦 Getting Started
 
 ### 1. Install Dependencies
