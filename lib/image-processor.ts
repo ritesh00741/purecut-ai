@@ -1,7 +1,7 @@
 /**
  * PureCut AI - High-Precision Background Removal & Matting Engine
- * Implements perceptual Delta-E color distance, multi-sample corner/perimeter clustering,
- * edge despill for fur and hair, and adjustable sensitivity.
+ * Implements perceptual Delta-E color distance, full-perimeter background palette clustering,
+ * center-weighted saliency prior, edge despill for fur and hair, and Hermite smoothstep alpha matting.
  */
 
 export interface ProcessOptions {
@@ -83,7 +83,8 @@ function rgbToHex(r: number, g: number, b: number): string {
 
 /**
  * Core Background Removal Algorithm
- * Analyzes perimeter and corners, clusters background palette, and applies perceptual matting.
+ * Analyzes perimeter and borders, clusters background palette, applies center saliency prior,
+ * and performs Hermite smoothstep perceptual matting with edge despill.
  */
 export async function removeBackground(
   imageSource: string | HTMLImageElement | File | Blob,
@@ -111,8 +112,8 @@ export async function removeBackground(
   let width = img.naturalWidth || img.width;
   let height = img.naturalHeight || img.height;
 
-  // Scale down oversized images for ultra-fast mobile processing
-  const maxDimension = 1200;
+  // Scale down oversized images for responsive processing
+  const maxDimension = 1400;
   if (width > maxDimension || height > maxDimension) {
     if (width > height) {
       height = Math.round((height * maxDimension) / width);
@@ -134,48 +135,52 @@ export async function removeBackground(
   const imgData = ctx.getImageData(0, 0, width, height);
   const data = imgData.data;
 
-  onProgress?.(35, 'Analyzing background color distribution...');
+  onProgress?.(35, 'Analyzing perimeter and background distribution...');
 
-  // 1. Identify Background Color Candidates from Corners and Border Patches
-  const bgColors: Array<[number, number, number]> = [];
+  // 1. Build Multi-Sample Background Palette from entire perimeter (top, bottom, left, right)
+  const bgPalette: Array<[number, number, number]> = [];
 
   if (options.targetColor) {
-    // If user clicked or specified a target color
-    bgColors.push([options.targetColor.r, options.targetColor.g, options.targetColor.b]);
+    bgPalette.push([options.targetColor.r, options.targetColor.g, options.targetColor.b]);
   } else {
-    // Sample 4 corners and border midpoints
-    const samplePoints = [
-      [Math.min(8, width - 1), Math.min(8, height - 1)], // Top-Left
-      [Math.max(0, width - 9), Math.min(8, height - 1)], // Top-Right
-      [Math.min(8, width - 1), Math.max(0, height - 9)], // Bottom-Left
-      [Math.max(0, width - 9), Math.max(0, height - 9)], // Bottom-Right
-      [Math.min(8, width - 1), Math.floor(height / 2)], // Mid-Left
-      [Math.max(0, width - 9), Math.floor(height / 2)], // Mid-Right
-      [Math.floor(width / 2), Math.min(8, height - 1)], // Mid-Top
-      [Math.floor(width / 4), Math.min(8, height - 1)], // Top quarter
-      [Math.floor((3 * width) / 4), Math.min(8, height - 1)], // Top 3/4
-    ];
-
-    for (const [sx, sy] of samplePoints) {
-      // Sample 3x3 patch around each point to avoid single-pixel noise
-      let pr = 0, pg = 0, pb = 0, pcount = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const px = Math.max(0, Math.min(width - 1, sx + dx));
-          const py = Math.max(0, Math.min(height - 1, sy + dy));
-          const pidx = (py * width + px) * 4;
-          pr += data[pidx];
-          pg += data[pidx + 1];
-          pb += data[pidx + 2];
-          pcount++;
-        }
-      }
-      bgColors.push([Math.round(pr / pcount), Math.round(pg / pcount), Math.round(pb / pcount)]);
+    const step = Math.max(1, Math.floor(Math.min(width, height) / 50));
+    // Sample horizontal borders
+    for (let x = 0; x < width; x += step) {
+      const topIdx = (0 * width + x) * 4;
+      const botIdx = ((height - 1) * width + x) * 4;
+      bgPalette.push([data[topIdx], data[topIdx + 1], data[topIdx + 2]]);
+      bgPalette.push([data[botIdx], data[botIdx + 1], data[botIdx + 2]]);
+    }
+    // Sample vertical borders
+    for (let y = 0; y < height; y += step) {
+      const leftIdx = (y * width + 0) * 4;
+      const rightIdx = (y * width + (width - 1)) * 4;
+      bgPalette.push([data[leftIdx], data[leftIdx + 1], data[leftIdx + 2]]);
+      bgPalette.push([data[rightIdx], data[rightIdx + 1], data[rightIdx + 2]]);
     }
   }
 
-  // Determine primary background color
-  const primaryBg = bgColors[0];
+  // Cluster background palette to top dominant modes
+  const clusters: Array<[number, number, number, number]> = []; // [r, g, b, count]
+  for (const c of bgPalette) {
+    let matched = false;
+    for (const cl of clusters) {
+      if (perceptualColorDistance(c[0], c[1], c[2], cl[0], cl[1], cl[2]) < 28) {
+        cl[0] = Math.round((cl[0] + c[0]) / 2);
+        cl[1] = Math.round((cl[1] + c[1]) / 2);
+        cl[2] = Math.round((cl[2] + c[2]) / 2);
+        cl[3]++;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) clusters.push([c[0], c[1], c[2], 1]);
+  }
+  clusters.sort((a, b) => b[3] - a[3]);
+  const dominantBg = clusters.slice(0, 8).map((c) => [c[0], c[1], c[2]] as [number, number, number]);
+
+  // Primary background color for reporting
+  const primaryBg = dominantBg[0] || [255, 255, 255];
   const detectedBgColor = {
     r: primaryBg[0],
     g: primaryBg[1],
@@ -183,40 +188,62 @@ export async function removeBackground(
     hex: rgbToHex(primaryBg[0], primaryBg[1], primaryBg[2]),
   };
 
-  onProgress?.(60, 'Separating subject and transparency alpha...');
+  onProgress?.(60, 'Separating subject with saliency matting...');
 
   const sensitivity = options.sensitivity ?? options.threshold ?? 48;
-  // Threshold distance below which pixel is pure transparent
-  const thresh = sensitivity * 1.35;
-  // Falloff range for soft antialiased edges (fur/hair)
-  const falloff = Math.max(12, sensitivity * 0.45);
+  const baseThreshold = sensitivity * 1.15;
+  const falloff = Math.max(16, sensitivity * 0.45);
+
+  const cx = width / 2;
+  const cy = height / 2;
+  const maxRadius = Math.sqrt(cx * cx + cy * cy);
 
   const feather = options.featherRadius ?? 2;
   const alphaBuffer = new Uint8Array(width * height);
 
-  // 2. Compute Alpha for Each Pixel based on minimum distance to background palette
+  // 2. Compute Alpha for Each Pixel with Center Saliency Prior
   for (let y = 0; y < height; y++) {
+    const dy = y - cy;
     for (let x = 0; x < width; x++) {
       const idx = (y * width + x) * 4;
       const r = data[idx];
       const g = data[idx + 1];
       const b = data[idx + 2];
 
-      let minDist = Infinity;
-      for (const [bgr, bgg, bgb] of bgColors) {
-        const d = perceptualColorDistance(r, g, b, bgr, bgg, bgb);
-        if (d < minDist) minDist = d;
+      let minBgDist = Infinity;
+      let closestBg = primaryBg;
+      for (const bg of dominantBg) {
+        const d = perceptualColorDistance(r, g, b, bg[0], bg[1], bg[2]);
+        if (d < minBgDist) {
+          minBgDist = d;
+          closestBg = bg;
+        }
       }
 
-      if (minDist <= thresh) {
-        alphaBuffer[y * width + x] = 0; // Pure Background
-      } else if (minDist >= thresh + falloff) {
-        alphaBuffer[y * width + x] = 255; // Pure Foreground Subject
+      // Saliency distance from center (0 at center, 1 at edge corners)
+      const dx = x - cx;
+      const distFromCenter = Math.sqrt(dx * dx + dy * dy) / maxRadius;
+      // Adaptive threshold protects the subject near the center while ensuring clean edges
+      const adaptiveThreshold = baseThreshold + (1 - distFromCenter) * 18;
+
+      let alpha = 255;
+      if (minBgDist <= adaptiveThreshold) {
+        alpha = 0; // Pure transparent background
+      } else if (minBgDist >= adaptiveThreshold + falloff) {
+        alpha = 255; // Solid foreground subject
       } else {
-        // Smooth transition for soft fur/hair anti-aliasing
-        const ratio = (minDist - thresh) / falloff;
-        alphaBuffer[y * width + x] = Math.round(ratio * 255);
+        // Smooth Hermite transition for soft fur/hair anti-aliasing
+        const t = (minBgDist - adaptiveThreshold) / falloff;
+        alpha = Math.round(t * t * (3 - 2 * t) * 255);
+
+        // Edge despill: neutralize background tint on semi-transparent transition pixels
+        const despillWeight = (1 - alpha / 255) * 0.4;
+        data[idx] = Math.max(0, Math.min(255, Math.round(r - closestBg[0] * despillWeight + 128 * despillWeight)));
+        data[idx + 1] = Math.max(0, Math.min(255, Math.round(g - closestBg[1] * despillWeight + 128 * despillWeight)));
+        data[idx + 2] = Math.max(0, Math.min(255, Math.round(b - closestBg[2] * despillWeight + 128 * despillWeight)));
       }
+
+      alphaBuffer[y * width + x] = alpha;
     }
   }
 
@@ -269,8 +296,8 @@ export async function removeBackground(
         compCtx.fillRect(0, 0, width, height);
       } else if (options.backgroundType === 'gradient' && options.backgroundColor) {
         const grad = compCtx.createLinearGradient(0, 0, width, height);
-        grad.addColorStop(0, '#6366f1');
-        grad.addColorStop(1, '#a855f7');
+        grad.addColorStop(0, options.backgroundColor);
+        grad.addColorStop(1, '#ffffff');
         compCtx.fillStyle = grad;
         compCtx.fillRect(0, 0, width, height);
       } else if (options.backgroundType === 'image' && options.backgroundImageUrl) {
@@ -278,15 +305,16 @@ export async function removeBackground(
           const bgImg = await loadImage(options.backgroundImageUrl);
           compCtx.drawImage(bgImg, 0, 0, width, height);
         } catch {
-          compCtx.fillStyle = '#ffffff';
-          compCtx.fillRect(0, 0, width, height);
+          // If bg image fails to load, keep transparent
         }
       }
 
+      // Drop shadow option
       if (options.dropShadow) {
         compCtx.shadowColor = options.shadowColor || 'rgba(0, 0, 0, 0.35)';
-        compCtx.shadowBlur = options.shadowBlur || 24;
-        compCtx.shadowOffsetY = options.shadowOffsetY || 12;
+        compCtx.shadowBlur = options.shadowBlur ?? 20;
+        compCtx.shadowOffsetX = options.shadowOffsetX ?? 0;
+        compCtx.shadowOffsetY = options.shadowOffsetY ?? 10;
       }
 
       compCtx.drawImage(canvas, 0, 0);
@@ -294,15 +322,14 @@ export async function removeBackground(
     }
   }
 
-  onProgress?.(95, 'Finalizing output...');
+  onProgress?.(95, 'Exporting high-resolution PNG...');
 
+  const dataUrl = outputCanvas.toDataURL('image/png');
   const blob = await new Promise<Blob>((resolve) => {
-    outputCanvas.toBlob((b) => resolve(b || new Blob()), 'image/png', 0.95);
+    outputCanvas.toBlob((b) => resolve(b || new Blob()), 'image/png');
   });
-  const dataUrl = outputCanvas.toDataURL('image/png', 0.95);
-  const durationMs = Math.round(performance.now() - startTime);
 
-  onProgress?.(100, 'Complete');
+  const durationMs = Math.round(performance.now() - startTime);
 
   return {
     dataUrl,
@@ -369,12 +396,16 @@ export async function compositeBackdrop(
 }
 
 /**
- * Trigger immediate browser download of an image
+ * Downloads a dataURL or Blob as a file with proper filename
  */
-export function downloadImage(url: string, filename: string) {
+export function downloadImage(source: string | Blob, filename: string): void {
   const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
+  if (typeof source === 'string') {
+    link.href = source;
+  } else {
+    link.href = URL.createObjectURL(source);
+  }
+  link.download = filename.endsWith('.png') ? filename : `${filename}.png`;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
