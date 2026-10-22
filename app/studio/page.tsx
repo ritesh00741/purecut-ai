@@ -154,7 +154,7 @@ export default function StudioPage() {
 
     // Set a client timeout controller so slow cellular connections don't hang
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const timeoutId = setTimeout(() => controller.abort(), 45000);
 
     const response = await fetch('/api/process-image', {
       method: 'POST',
@@ -249,7 +249,6 @@ export default function StudioPage() {
         const optimizedSource = await optimizeImageForUpload(source);
 
         try {
-          // Try high-precision server AI endpoint first
           const apiRes = await removeBackgroundViaAPI(optimizedSource, (p, step) => {
             setProgress(p);
             if (step) setProgressStep(step);
@@ -260,23 +259,11 @@ export default function StudioPage() {
           resSize = apiRes.sizeBytes;
           resDuration = apiRes.durationMs;
         } catch (apiErr) {
-          // Fall back gracefully to in-browser high-precision matting engine
-          console.warn('[PureCut AI] Server AI unavailable, running in-browser precision engine:', apiErr);
-          setProgress(60);
-          setProgressStep('Running high-speed browser engine...');
-          const localRes = await removeBackground(
-            optimizedSource,
-            { featherRadius, sensitivity },
-            (p, step) => {
-              setProgress(60 + Math.round(p * 0.38));
-              if (step) setProgressStep(step);
-            }
-          );
-          resultDataUrl = localRes.dataUrl;
-          resWidth = localRes.width;
-          resHeight = localRes.height;
-          resSize = localRes.resultSize;
-          resDuration = localRes.durationMs;
+          console.error('[PureCut AI] Neural API processing error:', apiErr);
+          const msg = apiErr instanceof Error ? apiErr.message : 'Failed to isolate background';
+          error('Processing Error', msg);
+          setIsProcessing(false);
+          return;
         }
       }
 

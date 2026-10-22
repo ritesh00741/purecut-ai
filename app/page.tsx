@@ -124,7 +124,7 @@ export default function HomePage() {
         fd.append('image', file);
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000);
+        const timeoutId = setTimeout(() => controller.abort(), 45000);
 
         const response = await fetch('/api/process-image', {
           method: 'POST',
@@ -133,7 +133,8 @@ export default function HomePage() {
         }).finally(() => clearTimeout(timeoutId));
 
         if (!response.ok) {
-          throw new Error(`Server returned ${response.status}`);
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.detail || errData.error || `Server returned ${response.status}`);
         }
 
         const blob = await response.blob();
@@ -152,15 +153,12 @@ export default function HomePage() {
           width = img.naturalWidth;
           height = img.naturalHeight;
         }
-      } catch (apiErr) {
-        console.warn('Server AI endpoint unavailable or timed out, executing in-browser engine:', apiErr);
-        setProgress(70);
-        setProgressStep('Running in-browser precision engine...');
-        const localRes = await removeBackground(file, { featherRadius: 2, sensitivity: 48 });
-        dataUrl = localRes.dataUrl;
-        width = localRes.width;
-        height = localRes.height;
-        durationMs = localRes.durationMs;
+      } catch (err) {
+        console.error('[PureCut AI] Processing error:', err);
+        const msg = err instanceof Error ? err.message : 'Failed to isolate background';
+        error('Processing Error', msg);
+        setIsProcessing(false);
+        return;
       }
 
       setProgress(100);
