@@ -108,8 +108,20 @@ export async function removeBackground(
     originalSize = img.width * img.height * 4;
   }
 
-  const width = img.naturalWidth || img.width;
-  const height = img.naturalHeight || img.height;
+  let width = img.naturalWidth || img.width;
+  let height = img.naturalHeight || img.height;
+
+  // Scale down oversized images for ultra-fast mobile processing
+  const maxDimension = 1200;
+  if (width > maxDimension || height > maxDimension) {
+    if (width > height) {
+      height = Math.round((height * maxDimension) / width);
+      width = maxDimension;
+    } else {
+      width = Math.round((width * maxDimension) / height);
+      height = maxDimension;
+    }
+  }
 
   // Offscreen canvas
   const canvas = document.createElement('canvas');
@@ -118,7 +130,7 @@ export async function removeBackground(
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) throw new Error('Could not get 2D canvas context');
 
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(img, 0, 0, width, height);
   const imgData = ctx.getImageData(0, 0, width, height);
   const data = imgData.data;
 

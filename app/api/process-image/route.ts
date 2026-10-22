@@ -73,6 +73,7 @@ async function getPortraitPipeline() {
   }
 }
 
+export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
@@ -104,12 +105,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Read input image into RawImage
+    // 1. Read input image into buffer
     const arrayBuffer = await file.arrayBuffer();
     const inputBuffer = Buffer.from(arrayBuffer);
 
+    // Optimize image size if very large (e.g. mobile 4K/12MP photos) to prevent serverless timeout
+    const sharp = (await import('sharp')).default;
+    let neuralInputBuffer = inputBuffer;
+    try {
+      const meta = await sharp(inputBuffer).metadata();
+      if ((meta.width && meta.width > 1400) || (meta.height && meta.height > 1400)) {
+        neuralInputBuffer = await sharp(inputBuffer)
+          .resize(1400, 1400, { fit: 'inside', withoutEnlargement: true })
+          .toBuffer();
+      }
+    } catch {
+      // Keep original buffer if sharp metadata read fails
+    }
+
     const { RawImage } = await import('@huggingface/transformers');
-    const rawInput = await RawImage.fromBlob(new Blob([inputBuffer], { type: file.type }));
+    const rawInput = await RawImage.fromBlob(new Blob([neuralInputBuffer], { type: file.type || 'image/jpeg' }));
 
     console.log(`[PureCut AI] Processing ${file.name} (${rawInput.width}x${rawInput.height}px) with ${requestedModel} model...`);
 
@@ -137,7 +152,6 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. Convert cutout to clean PNG using sharp
-    const sharp = (await import('sharp')).default;
     const outputBuffer = await sharp(Buffer.from(cutoutRaw.data.buffer), {
       raw: {
         width: cutoutRaw.width,

@@ -58,7 +58,7 @@ export default function ImageUploader({
         onDragLeave={() => setIsDragOver(false)}
         onDrop={handleDrop}
         onClick={() => !isProcessing && fileInputRef.current?.click()}
-        className={`relative border-2 border-dashed rounded-3xl p-8 sm:p-12 text-center transition-all cursor-pointer overflow-hidden ${
+        className={`relative border-2 border-dashed rounded-3xl p-6 sm:p-12 text-center transition-all cursor-pointer overflow-hidden ${
           isDragOver
             ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/40 scale-101'
             : 'border-slate-300 dark:border-slate-700 hover:border-indigo-400 dark:hover:border-indigo-500 bg-white/70 dark:bg-slate-900/70 shadow-lg hover:shadow-xl'
@@ -133,14 +133,14 @@ export default function ImageUploader({
           <span className="hidden sm:inline">Click to instant-test</span>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <div className="flex sm:grid sm:grid-cols-5 gap-2.5 sm:gap-3 overflow-x-auto pb-2 -mx-2 px-2 sm:mx-0 sm:px-0 scrollbar-none">
           {SAMPLE_IMAGES.map((sample) => (
             <button
               key={sample.id}
               onClick={() => handleSampleClick(sample)}
               disabled={isProcessing}
               type="button"
-              className="flex items-center gap-2.5 p-2 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-md transition text-left group"
+              className="flex items-center gap-2.5 p-2 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-indigo-400 dark:hover:border-indigo-500 hover:shadow-md transition text-left group shrink-0 sm:shrink min-w-[140px] sm:min-w-0"
             >
               <div className="w-10 h-10 rounded-xl overflow-hidden shrink-0 border border-slate-100 dark:border-slate-800">
                 {/* eslint-disable-next-line @next/next/no-img-element */}

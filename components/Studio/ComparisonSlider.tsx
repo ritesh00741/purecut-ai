@@ -82,7 +82,7 @@ export default function ComparisonSlider({
   return (
     <div
       ref={containerRef}
-      className={`relative select-none overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl cursor-ew-resize group ${className}`}
+      className={`relative select-none overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl cursor-ew-resize touch-none group ${className}`}
       onMouseDown={(e) => {
         setIsDragging(true);
         handleMove(e.clientX);

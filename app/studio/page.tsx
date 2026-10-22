@@ -25,7 +25,7 @@ import ImageUploader from '@/components/Studio/ImageUploader';
 import BackgroundEditor from '@/components/Studio/BackgroundEditor';
 import ComparisonSlider from '@/components/Studio/ComparisonSlider';
 import ExportModal from '@/components/Studio/ExportModal';
-import { compositeBackdrop, loadImage } from '@/lib/image-processor';
+import { removeBackground, compositeBackdrop, loadImage } from '@/lib/image-processor';
 import { saveProcessedImage, getStoredImages } from '@/lib/storage';
 import { BACKDROP_PRESETS, SAMPLE_IMAGES } from '@/lib/sample-images';
 import { useAuth } from '@/lib/auth-context';
@@ -82,9 +82,53 @@ export default function StudioPage() {
   }, []);
 
   /**
+   * Downscale high-resolution images (such as 12-48MP smartphone photos)
+   * before sending to prevent mobile upload timeouts or memory overflow.
+   */
+  const optimizeImageForUpload = async (source: string | File): Promise<string | File> => {
+    if (typeof source === 'string') return source;
+    if (source.size < 1.5 * 1024 * 1024) return source;
+
+    return new Promise((resolve) => {
+      const img = new Image();
+      const url = URL.createObjectURL(source);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const maxDim = 1400;
+        let { width, height } = img;
+        if (width <= maxDim && height <= maxDim) {
+          return resolve(source);
+        }
+        if (width > height && width > maxDim) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else if (height > maxDim) {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(source);
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) return resolve(source);
+            resolve(new File([blob], source.name.replace(/\.[^.]+$/, '') + '.png', { type: 'image/png' }));
+          },
+          'image/png',
+          0.92
+        );
+      };
+      img.onerror = () => resolve(source);
+      img.src = url;
+    });
+  };
+
+  /**
    * Calls the server-side /api/process-image endpoint which uses
-   * @huggingface/transformers + RMBG-1.4 for real AI background removal.
-   * Falls back to raw RGBA if sharp is not installed.
+   * Universal AI Segmentation (ISNet-ONNX).
    */
   const removeBackgroundViaAPI = async (
     source: string | File,
@@ -94,7 +138,6 @@ export default function StudioPage() {
 
     let file: File;
     if (typeof source === 'string') {
-      // Convert dataURL / URL to File
       const res = await fetch(source);
       const blob = await res.blob();
       file = new File([blob], 'image.png', { type: blob.type || 'image/png' });
@@ -109,15 +152,20 @@ export default function StudioPage() {
 
     onProgress(40, 'Running Neural AI Matting...');
 
+    // Set a client timeout controller so slow cellular connections don't hang
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+
     const response = await fetch('/api/process-image', {
       method: 'POST',
       body: fd,
-    });
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeoutId));
 
     onProgress(80, 'Applying mask to image...');
 
     if (!response.ok) {
-      const errJson = await response.json().catch(() => ({ error: 'Unknown server error' }));
+      const errJson = await response.json().catch(() => ({ error: 'Server error' }));
       throw new Error(errJson.error || `Server error ${response.status}`);
     }
 
@@ -129,14 +177,12 @@ export default function StudioPage() {
     let height = 0;
 
     if (format === 'raw-rgba') {
-      // Server sent raw RGBA bytes (8-byte header: width(4) + height(4))
       const buffer = await response.arrayBuffer();
       const headerView = new DataView(buffer);
       width = headerView.getUint32(0);
       height = headerView.getUint32(4);
       const rawRgba = new Uint8ClampedArray(buffer, 8);
 
-      // Render to canvas to get PNG dataURL
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
@@ -145,14 +191,12 @@ export default function StudioPage() {
       ctx.putImageData(imgData, 0, 0);
       dataUrl = canvas.toDataURL('image/png');
     } else {
-      // Server sent PNG binary
       const blob = await response.blob();
       dataUrl = await new Promise<string>((resolve) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as string);
         reader.readAsDataURL(blob);
       });
-      // Get dimensions from headers or decode from image
       width = parseInt(response.headers.get('X-PureCut-Width') || '0', 10);
       height = parseInt(response.headers.get('X-PureCut-Height') || '0', 10);
       if (!width || !height) {
@@ -167,7 +211,7 @@ export default function StudioPage() {
     return { dataUrl, width, height, sizeBytes: dataUrl.length * 0.75, durationMs };
   };
 
-  // Handle new image selection
+  // Handle new image selection with Dual-Engine (Server AI + High-Speed In-Browser Fallback)
   const handleImageSelected = async (source: string | File, name: string) => {
     setIsProcessing(true);
     setProgress(10);
@@ -175,7 +219,6 @@ export default function StudioPage() {
     setOriginalFileName(name);
 
     try {
-      // Read original source for comparison preview
       let srcUrl = '';
       if (typeof source === 'string') {
         srcUrl = source;
@@ -184,43 +227,75 @@ export default function StudioPage() {
       }
       setOriginalSource(srcUrl);
 
-      // Call server-side AI background removal
-      const result = await removeBackgroundViaAPI(source, (p, step) => {
-        setProgress(p);
-        if (step) setProgressStep(step);
-      });
+      // Pre-optimize oversized images (e.g. mobile camera photos)
+      const optimizedSource = await optimizeImageForUpload(source);
 
-      setIsolatedForeground(result.dataUrl);
-      setCompositedResult(result.dataUrl);
-      setDetectedBgColor(null); // AI model doesn't report bg color
+      let resultDataUrl = '';
+      let resWidth = 0;
+      let resHeight = 0;
+      let resSize = 0;
+      let resDuration = 0;
+
+      try {
+        // Try high-precision server AI endpoint first
+        const apiRes = await removeBackgroundViaAPI(optimizedSource, (p, step) => {
+          setProgress(p);
+          if (step) setProgressStep(step);
+        });
+        resultDataUrl = apiRes.dataUrl;
+        resWidth = apiRes.width;
+        resHeight = apiRes.height;
+        resSize = apiRes.sizeBytes;
+        resDuration = apiRes.durationMs;
+      } catch (apiErr) {
+        // Fall back gracefully to in-browser high-precision matting engine
+        console.warn('[PureCut AI] Server AI unavailable, running in-browser precision engine:', apiErr);
+        setProgress(60);
+        setProgressStep('Running high-speed browser engine...');
+        const localRes = await removeBackground(
+          optimizedSource,
+          { featherRadius, sensitivity },
+          (p, step) => {
+            setProgress(60 + Math.round(p * 0.38));
+            if (step) setProgressStep(step);
+          }
+        );
+        resultDataUrl = localRes.dataUrl;
+        resWidth = localRes.width;
+        resHeight = localRes.height;
+        resSize = localRes.resultSize;
+        resDuration = localRes.durationMs;
+      }
+
+      setIsolatedForeground(resultDataUrl);
+      setCompositedResult(resultDataUrl);
+      setDetectedBgColor(null);
       setDimensions({
-        width: result.width,
-        height: result.height,
-        sizeBytes: result.sizeBytes,
+        width: resWidth,
+        height: resHeight,
+        sizeBytes: resSize,
       });
 
-      // Deduct credit if authenticated
       consumeCredit();
 
-      // Save to history storage
       const newImg = {
         id: `img_${Date.now()}`,
         userId: user?.id,
         name,
         originalUrl: srcUrl,
-        resultUrl: result.dataUrl,
-        width: result.width,
-        height: result.height,
-        sizeBytes: result.sizeBytes,
+        resultUrl: resultDataUrl,
+        width: resWidth,
+        height: resHeight,
+        sizeBytes: resSize,
         backgroundType: 'transparent' as const,
         createdAt: new Date().toISOString(),
       };
       saveProcessedImage(newImg);
 
-      success('Background Removed!', `AI processed in ${result.durationMs}ms.`);
+      success('Background Removed!', `Processed in ${resDuration}ms.`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Processing failed';
-      error('AI Processing Failed', msg);
+      error('Processing Failed', msg);
     } finally {
       setIsProcessing(false);
     }
@@ -232,14 +307,21 @@ export default function StudioPage() {
     setProgress(15);
     setProgressStep('Re-running AI model...');
     try {
-      const result = await removeBackgroundViaAPI(originalSource, (p, step) => {
-        setProgress(p);
-        if (step) setProgressStep(step);
-      });
-      setIsolatedForeground(result.dataUrl);
-      setCompositedResult(result.dataUrl);
+      let resultDataUrl = '';
+      try {
+        const apiRes = await removeBackgroundViaAPI(originalSource, (p, step) => {
+          setProgress(p);
+          if (step) setProgressStep(step);
+        });
+        resultDataUrl = apiRes.dataUrl;
+      } catch {
+        const localRes = await removeBackground(originalSource, { featherRadius, sensitivity });
+        resultDataUrl = localRes.dataUrl;
+      }
+      setIsolatedForeground(resultDataUrl);
+      setCompositedResult(resultDataUrl);
       setDetectedBgColor(null);
-      success('Updated Cutout', `AI re-processed successfully.`);
+      success('Updated Cutout', 'Re-processed successfully.');
     } catch {
       error('Failed', 'Could not recalculate cutout.');
     } finally {
@@ -338,8 +420,8 @@ export default function StudioPage() {
           /* Interactive Editor Workspace */
           <div className="space-y-4">
             {/* Studio Toolbar Header */}
-            <div className="flex flex-wrap items-center justify-between gap-3 bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
-              <div className="flex items-center gap-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white dark:bg-slate-900 p-3 sm:p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+              <div className="flex items-center justify-between w-full sm:w-auto gap-2">
                 <button
                   onClick={() => setIsolatedForeground(null)}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 transition"
@@ -347,8 +429,8 @@ export default function StudioPage() {
                   <ArrowLeft className="w-3.5 h-3.5" />
                   <span>New Image</span>
                 </button>
-                <div className="hidden sm:block">
-                  <h2 className="text-xs font-bold text-slate-900 dark:text-white truncate max-w-xs">
+                <div className="text-right sm:text-left">
+                  <h2 className="text-xs font-bold text-slate-900 dark:text-white truncate max-w-[140px] sm:max-w-xs">
                     {originalFileName}
                   </h2>
                   <p className="text-[10px] text-slate-400">
@@ -358,34 +440,36 @@ export default function StudioPage() {
               </div>
 
               {/* View & Comparison Toggle */}
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setShowComparison(!showComparison)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
-                    showComparison
-                      ? 'bg-indigo-600 text-white'
-                      : 'border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
-                  }`}
-                >
-                  <Eye className="w-3.5 h-3.5" />
-                  <span>{showComparison ? 'Exit Split View' : 'Compare Before/After'}</span>
-                </button>
+              <div className="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowComparison(!showComparison)}
+                    className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+                      showComparison
+                        ? 'bg-indigo-600 text-white'
+                        : 'border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{showComparison ? 'Exit Split' : 'Compare'}</span>
+                  </button>
 
-                <button
-                  onClick={handleResetToTransparent}
-                  className="p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 dark:hover:text-white transition"
-                  title="Reset backdrop to transparent"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                </button>
+                  <button
+                    onClick={handleResetToTransparent}
+                    className="p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-slate-900 dark:hover:text-white transition"
+                    title="Reset backdrop to transparent"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                  </button>
+                </div>
 
                 {/* Export Button */}
                 <button
                   onClick={() => setIsExportOpen(true)}
-                  className="flex items-center gap-2 px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition hover:scale-102"
+                  className="flex items-center gap-1.5 sm:gap-2 px-3.5 sm:px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition hover:scale-102"
                 >
                   <Download className="w-4 h-4" />
-                  <span>Export Image</span>
+                  <span>Export</span>
                 </button>
               </div>
             </div>
@@ -394,7 +478,7 @@ export default function StudioPage() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
               {/* Image Canvas Box */}
               <div className="lg:col-span-2 space-y-3">
-                <div className="relative aspect-[4/3] rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-md overflow-hidden flex items-center justify-center p-4">
+                <div className="relative aspect-[4/3] min-h-[260px] sm:min-h-[420px] rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-md overflow-hidden flex items-center justify-center p-2 sm:p-4">
                   {showComparison && originalSource ? (
                     <ComparisonSlider
                       originalSrc={originalSource}

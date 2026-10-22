@@ -23,7 +23,7 @@ import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import ImageUploader from '@/components/Studio/ImageUploader';
 import ComparisonSlider from '@/components/Studio/ComparisonSlider';
-import { loadImage } from '@/lib/image-processor';
+import { removeBackground, loadImage } from '@/lib/image-processor';
 import { saveProcessedImage } from '@/lib/storage';
 import { useAuth } from '@/lib/auth-context';
 import { useToast } from '@/lib/toast-context';
@@ -46,10 +46,9 @@ export default function HomePage() {
   const handleHeroImageSelected = async (source: string | File, name: string) => {
     setIsProcessing(true);
     setProgress(15);
-    setProgressStep('Uploading to AI engine...');
+    setProgressStep('Preparing image...');
 
     try {
-      // Convert source to File for API call
       let file: File;
       if (typeof source === 'string') {
         const res = await fetch(source);
@@ -59,59 +58,92 @@ export default function HomePage() {
         file = source;
       }
 
-      setProgress(30);
-      setProgressStep('Running PureCut Neural AI...');
-
-      const fd = new FormData();
-      fd.append('image', file);
-
-      const response = await fetch('/api/process-image', { method: 'POST', body: fd });
-
-      setProgress(80);
-      setProgressStep('Applying transparency mask...');
-
-      if (!response.ok) {
-        const errJson = await response.json().catch(() => ({ error: 'Server error' }));
-        throw new Error(errJson.error || `Server error ${response.status}`);
+      // Pre-downscale very large camera photos if > 1.5MB
+      if (file.size > 1.5 * 1024 * 1024) {
+        file = await new Promise((resolve) => {
+          const img = new Image();
+          const u = URL.createObjectURL(file);
+          img.onload = () => {
+            URL.revokeObjectURL(u);
+            const maxDim = 1400;
+            let { width, height } = img;
+            if (width > height && width > maxDim) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            } else if (height > maxDim) {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return resolve(file);
+            ctx.drawImage(img, 0, 0, width, height);
+            canvas.toBlob((b) => {
+              if (!b) return resolve(file);
+              resolve(new File([b], file.name.replace(/\.[^.]+$/, '') + '.png', { type: 'image/png' }));
+            }, 'image/png', 0.92);
+          };
+          img.onerror = () => resolve(file);
+          img.src = u;
+        });
       }
 
-      const format = response.headers.get('X-PureCut-Format') || 'png';
-      let dataUrl: string;
+      setProgress(35);
+      setProgressStep('Running PureCut Neural AI...');
+
+      let dataUrl = '';
       let width = 0;
       let height = 0;
-      const durationMs = parseInt(response.headers.get('X-PureCut-Duration-Ms') || '0', 10);
+      let durationMs = 0;
 
-      if (format === 'raw-rgba') {
-        const buffer = await response.arrayBuffer();
-        const headerView = new DataView(buffer);
-        width = headerView.getUint32(0);
-        height = headerView.getUint32(4);
-        const rawRgba = new Uint8ClampedArray(buffer, 8);
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d')!;
-        ctx.putImageData(new ImageData(rawRgba, width, height), 0, 0);
-        dataUrl = canvas.toDataURL('image/png');
-      } else {
+      try {
+        const fd = new FormData();
+        fd.append('image', file);
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+        const response = await fetch('/api/process-image', {
+          method: 'POST',
+          body: fd,
+          signal: controller.signal,
+        }).finally(() => clearTimeout(timeoutId));
+
+        if (!response.ok) {
+          throw new Error(`Server returned ${response.status}`);
+        }
+
         const blob = await response.blob();
         dataUrl = await new Promise<string>((resolve) => {
           const reader = new FileReader();
           reader.onload = () => resolve(reader.result as string);
           reader.readAsDataURL(blob);
         });
+
         width = parseInt(response.headers.get('X-PureCut-Width') || '0', 10);
         height = parseInt(response.headers.get('X-PureCut-Height') || '0', 10);
+        durationMs = parseInt(response.headers.get('X-PureCut-Duration-Ms') || '0', 10);
+
         if (!width || !height) {
           const img = await loadImage(dataUrl);
           width = img.naturalWidth;
           height = img.naturalHeight;
         }
+      } catch (apiErr) {
+        console.warn('Server AI endpoint unavailable or timed out, executing in-browser engine:', apiErr);
+        setProgress(70);
+        setProgressStep('Running in-browser precision engine...');
+        const localRes = await removeBackground(file, { featherRadius: 2, sensitivity: 48 });
+        dataUrl = localRes.dataUrl;
+        width = localRes.width;
+        height = localRes.height;
+        durationMs = localRes.durationMs;
       }
 
-      setProgress(95);
+      setProgress(100);
 
-      // Save to storage
       const srcUrl = typeof source === 'string' ? source : URL.createObjectURL(file);
       const newImg = {
         id: `img_${Date.now()}`,
@@ -127,7 +159,7 @@ export default function HomePage() {
       };
       saveProcessedImage(newImg);
 
-      success('Background Removed!', `AI processed in ${durationMs}ms. Redirecting to Studio...`);
+      success('Background Removed!', `Processed in ${durationMs}ms. Redirecting to Studio...`);
       sessionStorage.setItem('purecut_current_edit', JSON.stringify(newImg));
 
       setTimeout(() => {
