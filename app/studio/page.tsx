@@ -50,6 +50,7 @@ export default function StudioPage() {
   const [bgImage, setBgImage] = useState<string>('');
   const [featherRadius, setFeatherRadius] = useState<number>(2);
   const [sensitivity, setSensitivity] = useState<number>(48);
+  const [activeModel, setActiveModel] = useState<'universal' | 'portrait'>('universal');
   const [detectedBgColor, setDetectedBgColor] = useState<{ r: number; g: number; b: number; hex: string } | null>(null);
   const [dropShadow, setDropShadow] = useState<boolean>(false);
 
@@ -128,11 +129,12 @@ export default function StudioPage() {
 
   /**
    * Calls the server-side /api/process-image endpoint which uses
-   * Universal AI Segmentation (ISNet-ONNX).
+   * Universal AI Segmentation (ISNet-ONNX) or Portrait AI (MODNet).
    */
   const removeBackgroundViaAPI = async (
     source: string | File,
-    onProgress: (p: number, step?: string) => void
+    onProgress: (p: number, step?: string) => void,
+    options?: { model?: 'universal' | 'portrait'; sensitivity?: number }
   ): Promise<{ dataUrl: string; width: number; height: number; sizeBytes: number; durationMs: number }> => {
     onProgress(10, 'Preparing image...');
 
@@ -145,16 +147,18 @@ export default function StudioPage() {
       file = source;
     }
 
-    onProgress(25, 'Uploading to AI engine...');
+    onProgress(25, 'Uploading to Neural AI engine...');
 
     const fd = new FormData();
     fd.append('image', file);
+    if (options?.model) fd.append('model', options.model);
+    if (options?.sensitivity) fd.append('sensitivity', String(options.sensitivity));
 
     onProgress(40, 'Running Neural AI Matting...');
 
     // Set a client timeout controller so slow cellular connections don't hang
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45000);
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
 
     const response = await fetch('/api/process-image', {
       method: 'POST',
@@ -166,44 +170,23 @@ export default function StudioPage() {
 
     if (!response.ok) {
       const errJson = await response.json().catch(() => ({ error: 'Server error' }));
-      throw new Error(errJson.error || `Server error ${response.status}`);
+      throw new Error(errJson.error || errJson.detail || `Server error ${response.status}`);
     }
 
-    const format = response.headers.get('X-PureCut-Format') || 'png';
+    const blob = await response.blob();
+    const dataUrl = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.readAsDataURL(blob);
+    });
+    let width = parseInt(response.headers.get('X-PureCut-Width') || '0', 10);
+    let height = parseInt(response.headers.get('X-PureCut-Height') || '0', 10);
     const durationMs = parseInt(response.headers.get('X-PureCut-Duration-Ms') || '0', 10);
 
-    let dataUrl: string;
-    let width = 0;
-    let height = 0;
-
-    if (format === 'raw-rgba') {
-      const buffer = await response.arrayBuffer();
-      const headerView = new DataView(buffer);
-      width = headerView.getUint32(0);
-      height = headerView.getUint32(4);
-      const rawRgba = new Uint8ClampedArray(buffer, 8);
-
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d')!;
-      const imgData = new ImageData(rawRgba, width, height);
-      ctx.putImageData(imgData, 0, 0);
-      dataUrl = canvas.toDataURL('image/png');
-    } else {
-      const blob = await response.blob();
-      dataUrl = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.readAsDataURL(blob);
-      });
-      width = parseInt(response.headers.get('X-PureCut-Width') || '0', 10);
-      height = parseInt(response.headers.get('X-PureCut-Height') || '0', 10);
-      if (!width || !height) {
-        const img = await loadImage(dataUrl);
-        width = img.naturalWidth;
-        height = img.naturalHeight;
-      }
+    if (!width || !height) {
+      const img = await loadImage(dataUrl);
+      width = img.naturalWidth;
+      height = img.naturalHeight;
     }
 
     onProgress(95, 'Finalizing...');
@@ -249,10 +232,14 @@ export default function StudioPage() {
         const optimizedSource = await optimizeImageForUpload(source);
 
         try {
-          const apiRes = await removeBackgroundViaAPI(optimizedSource, (p, step) => {
-            setProgress(p);
-            if (step) setProgressStep(step);
-          });
+          const apiRes = await removeBackgroundViaAPI(
+            optimizedSource,
+            (p, step) => {
+              setProgress(p);
+              if (step) setProgressStep(step);
+            },
+            { model: activeModel, sensitivity }
+          );
           resultDataUrl = apiRes.dataUrl;
           resWidth = apiRes.width;
           resHeight = apiRes.height;
@@ -301,31 +288,42 @@ export default function StudioPage() {
     }
   };
 
-  const handleRecalculate = async () => {
+  const handleRecalculate = async (targetModel?: 'universal' | 'portrait') => {
     if (!originalSource) return;
+    const modelToUse = targetModel || activeModel;
     setIsProcessing(true);
     setProgress(15);
-    setProgressStep('Re-running AI model...');
+    setProgressStep(`Re-processing with ${modelToUse === 'portrait' ? 'Portrait AI (MODNet)' : 'Universal AI (ISNet)'}...`);
     try {
-      let resultDataUrl = '';
-      try {
-        const apiRes = await removeBackgroundViaAPI(originalSource, (p, step) => {
+      const apiRes = await removeBackgroundViaAPI(
+        originalSource,
+        (p, step) => {
           setProgress(p);
           if (step) setProgressStep(step);
-        });
-        resultDataUrl = apiRes.dataUrl;
-      } catch {
-        const localRes = await removeBackground(originalSource, { featherRadius, sensitivity });
-        resultDataUrl = localRes.dataUrl;
-      }
-      setIsolatedForeground(resultDataUrl);
-      setCompositedResult(resultDataUrl);
+        },
+        { model: modelToUse, sensitivity }
+      );
+      setIsolatedForeground(apiRes.dataUrl);
+      setCompositedResult(apiRes.dataUrl);
       setDetectedBgColor(null);
-      success('Updated Cutout', 'Re-processed successfully.');
-    } catch {
-      error('Failed', 'Could not recalculate cutout.');
+      setDimensions({
+        width: apiRes.width,
+        height: apiRes.height,
+        sizeBytes: apiRes.sizeBytes,
+      });
+      success('Updated Cutout', `Re-processed with ${modelToUse === 'portrait' ? 'Portrait' : 'Universal'} AI.`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Could not recalculate cutout.';
+      error('Failed', msg);
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  const handleModelChange = (model: 'universal' | 'portrait') => {
+    setActiveModel(model);
+    if (originalSource && isolatedForeground) {
+      handleRecalculate(model);
     }
   };
 
@@ -558,7 +556,6 @@ export default function StudioPage() {
                   activeColor={bgColor}
                   activeImage={bgImage}
                   featherRadius={featherRadius}
-                  sensitivity={sensitivity}
                   detectedBgColor={detectedBgColor}
                   dropShadow={dropShadow}
                   onSelectPreset={handleSelectPreset}
@@ -567,8 +564,11 @@ export default function StudioPage() {
                     setBgColor(color);
                   }}
                   onFeatherChange={(val) => setFeatherRadius(val)}
+                  sensitivity={sensitivity}
+                  activeModel={activeModel}
+                  onModelChange={handleModelChange}
                   onSensitivityChange={(val) => setSensitivity(val)}
-                  onReapplySensitivity={handleRecalculate}
+                  onReapplySensitivity={() => handleRecalculate()}
                   onDropShadowChange={(val) => setDropShadow(val)}
                 />
 

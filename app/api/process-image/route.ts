@@ -81,14 +81,16 @@ export const maxDuration = 60;
 
 /**
  * Refines raw neural network alpha mask:
- * 1. Suppresses ghost background noise (<= 12 -> 0)
- * 2. Solidifies opaque foreground (>= 235 -> 255)
- * 3. Applies Hermite smoothstep to edge transitions (12 < a < 235) for natural hair/fur/products
+ * 1. Suppresses ghost background noise (<= lowThresh -> 0)
+ * 2. Solidifies opaque foreground (>= highThresh -> 255)
+ * 3. Applies Hermite smoothstep to edge transitions for natural hair/fur/products
  */
-function refineAlphaData(maskData: Uint8Array | number[]): Uint8Array {
+function refineAlphaData(maskData: Uint8Array | Uint8ClampedArray | number[], sensitivity = 48): Uint8Array {
   const refined = new Uint8Array(maskData.length);
-  const lowThresh = 12;
-  const highThresh = 235;
+  // sensitivity ranges from 20 (keep more details) to 80 (remove more aggressive)
+  // map sensitivity to low threshold: 20 -> 4, 48 -> 14, 80 -> 36
+  const lowThresh = Math.max(3, Math.min(60, Math.round((sensitivity / 50) * 14)));
+  const highThresh = 225;
   const range = highThresh - lowThresh;
 
   for (let i = 0; i < maskData.length; i++) {
@@ -112,6 +114,7 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const file = formData.get('image') as File | null;
     const requestedModel = (formData.get('model') as string) || 'universal';
+    const sensitivity = parseInt((formData.get('sensitivity') as string) || '48', 10);
 
     if (!file) {
       return NextResponse.json(
@@ -155,34 +158,67 @@ export async function POST(req: NextRequest) {
     const { RawImage } = await import('@huggingface/transformers');
     const rawInput = await RawImage.fromBlob(new Blob([neuralInputBuffer], { type: file.type || 'image/jpeg' }));
 
-    console.log(`[PureCut AI] Processing ${file.name} (${rawInput.width}x${rawInput.height}px) with ${requestedModel} model...`);
+    console.log(`[PureCut AI] Processing ${file.name} (${rawInput.width}x${rawInput.height}px) with ${requestedModel} model (sensitivity: ${sensitivity})...`);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let cutoutRaw: any;
     let modelUsed = 'ISNet-Universal';
 
     if (requestedModel === 'portrait') {
-      // Use MODNet
+      // Use MODNet directly
       const pipe = await getPortraitPipeline();
       // @ts-expect-error - pipeline call
       cutoutRaw = await pipe(rawInput);
-      modelUsed = 'MODNet-Portrait';
+      // In-place Hermite smoothstep alpha refinement on MODNet
+      const lowThresh = Math.max(3, Math.min(60, Math.round((sensitivity / 50) * 14)));
+      const highThresh = 225;
+      const range = highThresh - lowThresh;
+      for (let i = 3; i < cutoutRaw.data.length; i += 4) {
+        const a = cutoutRaw.data[i];
+        if (a <= lowThresh) cutoutRaw.data[i] = 0;
+        else if (a >= highThresh) cutoutRaw.data[i] = 255;
+        else {
+          const t = (a - lowThresh) / range;
+          cutoutRaw.data[i] = Math.round(t * t * (3 - 2 * t) * 255);
+        }
+      }
+      modelUsed = 'MODNet-Portrait-Refined';
     } else {
-      // Use ISNet (Universal across all categories: people, products, vehicles, animals)
-      const pipe = await getUniversalPipeline();
-      // @ts-expect-error - pipeline call
-      const out = await pipe(rawInput);
-      // @ts-expect-error - mask in array
-      const rawMask = out[0].mask;
+      // Try ISNet Universal first, with automatic fallback to MODNet if memory/timeout occurs
+      try {
+        const pipe = await getUniversalPipeline();
+        // @ts-expect-error - pipeline call
+        const out = await pipe(rawInput);
+        // @ts-expect-error - mask in array
+        const rawMask = out[0].mask;
 
-      // Apply Precision Alpha Matte Refinement
-      const refinedData = refineAlphaData(rawMask.data);
-      const refinedMask = new RawImage(refinedData, rawMask.width, rawMask.height, 1);
+        // Apply Precision Alpha Matte Refinement
+        const refinedData = refineAlphaData(rawMask.data, sensitivity);
+        const refinedMask = new RawImage(refinedData, rawMask.width, rawMask.height, 1);
 
-      const cutout = rawInput.clone();
-      cutout.putAlpha(refinedMask);
-      cutoutRaw = cutout;
-      modelUsed = 'ISNet-Universal-MultiObject-Refined';
+        const cutout = rawInput.clone();
+        cutout.putAlpha(refinedMask);
+        cutoutRaw = cutout;
+        modelUsed = 'ISNet-Universal-MultiObject-Refined';
+      } catch (universalErr) {
+        console.warn('[PureCut AI] Universal pipeline fallback to MODNet:', universalErr);
+        const pipe = await getPortraitPipeline();
+        // @ts-expect-error - pipeline call
+        cutoutRaw = await pipe(rawInput);
+        const lowThresh = Math.max(3, Math.min(60, Math.round((sensitivity / 50) * 14)));
+        const highThresh = 225;
+        const range = highThresh - lowThresh;
+        for (let i = 3; i < cutoutRaw.data.length; i += 4) {
+          const a = cutoutRaw.data[i];
+          if (a <= lowThresh) cutoutRaw.data[i] = 0;
+          else if (a >= highThresh) cutoutRaw.data[i] = 255;
+          else {
+            const t = (a - lowThresh) / range;
+            cutoutRaw.data[i] = Math.round(t * t * (3 - 2 * t) * 255);
+          }
+        }
+        modelUsed = 'MODNet-Portrait-Fallback';
+      }
     }
 
     // 2. Convert cutout to clean 4-channel PNG using sharp

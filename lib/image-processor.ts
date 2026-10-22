@@ -5,6 +5,7 @@
  */
 
 export interface ProcessOptions {
+  model?: 'universal' | 'portrait';
   featherRadius?: number; // 0 to 8
   sensitivity?: number; // 15 to 90 (default 48)
   threshold?: number;
@@ -89,6 +90,8 @@ export async function removeBackground(
 
   const fd = new FormData();
   fd.append('image', file, 'upload.png');
+  if (options.model) fd.append('model', options.model);
+  if (options.sensitivity) fd.append('sensitivity', String(options.sensitivity));
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 45000);

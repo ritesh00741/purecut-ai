@@ -10,6 +10,7 @@ interface BackgroundEditorProps {
   activeImage: string;
   featherRadius: number;
   sensitivity?: number;
+  activeModel?: 'universal' | 'portrait';
   detectedBgColor?: { r: number; g: number; b: number; hex: string } | null;
   dropShadow: boolean;
   onSelectPreset: (preset: typeof BACKDROP_PRESETS[0]) => void;
@@ -17,6 +18,7 @@ interface BackgroundEditorProps {
   onFeatherChange: (val: number) => void;
   onSensitivityChange?: (val: number) => void;
   onReapplySensitivity?: () => void;
+  onModelChange?: (model: 'universal' | 'portrait') => void;
   onDropShadowChange: (val: boolean) => void;
 }
 
@@ -26,6 +28,7 @@ export default function BackgroundEditor({
   activeImage,
   featherRadius,
   sensitivity = 48,
+  activeModel = 'universal',
   detectedBgColor,
   dropShadow,
   onSelectPreset,
@@ -33,6 +36,7 @@ export default function BackgroundEditor({
   onFeatherChange,
   onSensitivityChange,
   onReapplySensitivity,
+  onModelChange,
   onDropShadowChange,
 }: BackgroundEditorProps) {
   return (
@@ -121,6 +125,53 @@ export default function BackgroundEditor({
           />
         </div>
       </div>
+
+      {/* AI Matting Engine Selection */}
+      {onModelChange && (
+        <div className="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-medium text-slate-600 dark:text-slate-400 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+              AI Neural Model
+            </span>
+            <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-full">
+              {activeModel === 'portrait' ? 'MODNet Portrait' : 'ISNet Universal'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => onModelChange('universal')}
+              className={`p-2.5 rounded-xl text-left border transition text-xs ${
+                activeModel === 'universal'
+                  ? 'border-indigo-600 bg-indigo-50/70 dark:bg-indigo-950/50 shadow-sm ring-1 ring-indigo-500'
+                  : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              <div className="font-bold text-slate-900 dark:text-white flex items-center justify-between">
+                <span>Universal AI</span>
+                {activeModel === 'universal' && <span className="w-1.5 h-1.5 rounded-full bg-indigo-600"></span>}
+              </div>
+              <p className="text-[10px] text-slate-400 mt-0.5">Objects, Cars, Animals, Products</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => onModelChange('portrait')}
+              className={`p-2.5 rounded-xl text-left border transition text-xs ${
+                activeModel === 'portrait'
+                  ? 'border-indigo-600 bg-indigo-50/70 dark:bg-indigo-950/50 shadow-sm ring-1 ring-indigo-500'
+                  : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              <div className="font-bold text-slate-900 dark:text-white flex items-center justify-between">
+                <span>Portrait AI</span>
+                {activeModel === 'portrait' && <span className="w-1.5 h-1.5 rounded-full bg-indigo-600"></span>}
+              </div>
+              <p className="text-[10px] text-slate-400 mt-0.5">Hair, Clothes, Humans & Faces</p>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Background Removal Sensitivity Slider */}
       {onSensitivityChange && (

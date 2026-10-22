@@ -5,14 +5,16 @@ const nextConfig = {
     domains: ['images.unsplash.com', 'res.cloudinary.com'],
   },
   experimental: {
-    serverComponentsExternalPackages: ['@huggingface/transformers', 'sharp', 'onnxruntime-node'],
+    serverComponentsExternalPackages: ['@huggingface/transformers', 'sharp', 'onnxruntime-node', 'onnxruntime-common'],
     outputFileTracingIncludes: {
       '/api/**/*': [
         './node_modules/onnxruntime-node/**/*',
+        './node_modules/onnxruntime-common/**/*',
         './node_modules/@huggingface/transformers/**/*',
       ],
       '/*': [
         './node_modules/onnxruntime-node/**/*',
+        './node_modules/onnxruntime-common/**/*',
       ],
     },
     serverActions: {
