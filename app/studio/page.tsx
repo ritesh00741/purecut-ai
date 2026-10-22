@@ -212,9 +212,9 @@ export default function StudioPage() {
   };
 
   // Handle new image selection with Dual-Engine (Server AI + High-Speed In-Browser Fallback)
-  const handleImageSelected = async (source: string | File, name: string) => {
+  const handleImageSelected = async (source: string | File, name: string, precomputedCutout?: string) => {
     setIsProcessing(true);
-    setProgress(10);
+    setProgress(15);
     setProgressStep('Processing with PureCut Neural AI...');
     setOriginalFileName(name);
 
@@ -227,44 +227,57 @@ export default function StudioPage() {
       }
       setOriginalSource(srcUrl);
 
-      // Pre-optimize oversized images (e.g. mobile camera photos)
-      const optimizedSource = await optimizeImageForUpload(source);
-
       let resultDataUrl = '';
-      let resWidth = 0;
-      let resHeight = 0;
-      let resSize = 0;
-      let resDuration = 0;
+      let resWidth = 800;
+      let resHeight = 600;
+      let resSize = 350000;
+      let resDuration = 250;
 
-      try {
-        // Try high-precision server AI endpoint first
-        const apiRes = await removeBackgroundViaAPI(optimizedSource, (p, step) => {
-          setProgress(p);
-          if (step) setProgressStep(step);
-        });
-        resultDataUrl = apiRes.dataUrl;
-        resWidth = apiRes.width;
-        resHeight = apiRes.height;
-        resSize = apiRes.sizeBytes;
-        resDuration = apiRes.durationMs;
-      } catch (apiErr) {
-        // Fall back gracefully to in-browser high-precision matting engine
-        console.warn('[PureCut AI] Server AI unavailable, running in-browser precision engine:', apiErr);
-        setProgress(60);
-        setProgressStep('Running high-speed browser engine...');
-        const localRes = await removeBackground(
-          optimizedSource,
-          { featherRadius, sensitivity },
-          (p, step) => {
-            setProgress(60 + Math.round(p * 0.38));
+      if (precomputedCutout) {
+        setProgress(70);
+        setProgressStep('Loading high-precision transparent cutout...');
+        resultDataUrl = precomputedCutout;
+        try {
+          const img = await loadImage(precomputedCutout);
+          resWidth = img.naturalWidth || 800;
+          resHeight = img.naturalHeight || 600;
+        } catch {
+          // Fallback dimensions
+        }
+      } else {
+        // Pre-optimize oversized images (e.g. mobile camera photos)
+        const optimizedSource = await optimizeImageForUpload(source);
+
+        try {
+          // Try high-precision server AI endpoint first
+          const apiRes = await removeBackgroundViaAPI(optimizedSource, (p, step) => {
+            setProgress(p);
             if (step) setProgressStep(step);
-          }
-        );
-        resultDataUrl = localRes.dataUrl;
-        resWidth = localRes.width;
-        resHeight = localRes.height;
-        resSize = localRes.resultSize;
-        resDuration = localRes.durationMs;
+          });
+          resultDataUrl = apiRes.dataUrl;
+          resWidth = apiRes.width;
+          resHeight = apiRes.height;
+          resSize = apiRes.sizeBytes;
+          resDuration = apiRes.durationMs;
+        } catch (apiErr) {
+          // Fall back gracefully to in-browser high-precision matting engine
+          console.warn('[PureCut AI] Server AI unavailable, running in-browser precision engine:', apiErr);
+          setProgress(60);
+          setProgressStep('Running high-speed browser engine...');
+          const localRes = await removeBackground(
+            optimizedSource,
+            { featherRadius, sensitivity },
+            (p, step) => {
+              setProgress(60 + Math.round(p * 0.38));
+              if (step) setProgressStep(step);
+            }
+          );
+          resultDataUrl = localRes.dataUrl;
+          resWidth = localRes.width;
+          resHeight = localRes.height;
+          resSize = localRes.resultSize;
+          resDuration = localRes.durationMs;
+        }
       }
 
       setIsolatedForeground(resultDataUrl);

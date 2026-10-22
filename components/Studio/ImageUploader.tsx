@@ -6,7 +6,7 @@ import { SAMPLE_IMAGES, SampleImage } from '@/lib/sample-images';
 import { useToast } from '@/lib/toast-context';
 
 interface ImageUploaderProps {
-  onImageSelected: (source: string | File, name: string) => void;
+  onImageSelected: (source: string | File, name: string, precomputedCutout?: string) => void;
   isProcessing: boolean;
   progress: number;
   progressStep?: string;
@@ -44,7 +44,7 @@ export default function ImageUploader({
   };
 
   const handleSampleClick = (sample: SampleImage) => {
-    onImageSelected(sample.url, `${sample.name.toLowerCase().replace(/\s+/g, '-')}.png`);
+    onImageSelected(sample.url, `${sample.name.toLowerCase().replace(/\s+/g, '-')}.png`, sample.cutoutUrl);
   };
 
   return (

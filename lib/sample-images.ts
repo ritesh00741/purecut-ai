@@ -4,6 +4,7 @@ export interface SampleImage {
   category: string;
   url: string;
   thumbnail: string;
+  cutoutUrl: string;
   description: string;
 }
 
@@ -12,40 +13,45 @@ export const SAMPLE_IMAGES: SampleImage[] = [
     id: 'sample-portrait',
     name: 'Portrait Model',
     category: 'People',
-    url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=800&q=80',
-    thumbnail: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+    url: '/samples/portrait.jpg',
+    thumbnail: '/samples/portrait.jpg',
+    cutoutUrl: '/samples/portrait-cutout.png',
     description: 'Fine hair detail and portrait skin tones'
   },
   {
     id: 'sample-sneaker',
     name: 'Product Sneaker',
     category: 'E-commerce',
-    url: 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=800&q=80',
-    thumbnail: 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=200&q=80',
+    url: '/samples/sneaker.jpg',
+    thumbnail: '/samples/sneaker.jpg',
+    cutoutUrl: '/samples/sneaker-cutout.png',
     description: 'Clean edge detection for eCommerce products'
   },
   {
     id: 'sample-watch',
     name: 'Luxury Watch',
     category: 'Product',
-    url: 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=800&q=80',
-    thumbnail: 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=200&q=80',
+    url: '/samples/watch.jpg',
+    thumbnail: '/samples/watch.jpg',
+    cutoutUrl: '/samples/watch-cutout.png',
     description: 'Metallic reflections and glass surfaces'
   },
   {
     id: 'sample-car',
     name: 'Sports Car',
     category: 'Automotive',
-    url: 'https://images.unsplash.com/photo-1503376780353-7e6692767b70?auto=format&fit=crop&w=800&q=80',
-    thumbnail: 'https://images.unsplash.com/photo-1503376780353-7e6692767b70?auto=format&fit=crop&w=200&q=80',
+    url: '/samples/car.jpg',
+    thumbnail: '/samples/car.jpg',
+    cutoutUrl: '/samples/car-cutout.png',
     description: 'Complex silhouettes and shadows'
   },
   {
     id: 'sample-cat',
     name: 'Cute Kitten',
     category: 'Animals',
-    url: 'https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?auto=format&fit=crop&w=800&q=80',
-    thumbnail: 'https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?auto=format&fit=crop&w=200&q=80',
+    url: '/samples/cat.jpg',
+    thumbnail: '/samples/cat.jpg',
+    cutoutUrl: '/samples/cat-cutout.png',
     description: 'Complex fur edges and whiskers'
   }
 ];

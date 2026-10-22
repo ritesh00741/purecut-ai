@@ -43,12 +43,33 @@ export default function HomePage() {
   // Active Use Case tab
   const [activeTab, setActiveTab] = useState<'ecommerce' | 'portraits' | 'creatives' | 'developers'>('ecommerce');
 
-  const handleHeroImageSelected = async (source: string | File, name: string) => {
+  const handleHeroImageSelected = async (source: string | File, name: string, precomputedCutout?: string) => {
     setIsProcessing(true);
     setProgress(15);
     setProgressStep('Preparing image...');
 
     try {
+      if (precomputedCutout) {
+        setProgress(85);
+        setProgressStep('Loading high-precision transparent cutout...');
+        const newImg = {
+          id: `img_${Date.now()}`,
+          userId: user?.id,
+          name,
+          originalUrl: typeof source === 'string' ? source : precomputedCutout,
+          resultUrl: precomputedCutout,
+          width: 800,
+          height: 600,
+          sizeBytes: 350000,
+          backgroundType: 'transparent' as const,
+          createdAt: new Date().toISOString(),
+        };
+        saveProcessedImage(newImg);
+        success('Background Removed!', 'Redirecting to Studio...');
+        sessionStorage.setItem('purecut_current_edit', JSON.stringify(newImg));
+        setTimeout(() => router.push('/studio'), 350);
+        return;
+      }
       let file: File;
       if (typeof source === 'string') {
         const res = await fetch(source);
